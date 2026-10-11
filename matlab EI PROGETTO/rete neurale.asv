@@ -1,0 +1,340 @@
+%% Percorsi delle cartelle di training e test
+clear all; close all; clc;
+im_train2 = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\im_train2';
+gt_train2 = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\gt_train2';
+im_test2 = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\im_test2';
+gt_test2= 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\gt_test2';
+
+%%
+% Cartelle di input
+maskFolder = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\gt_train2';
+imageFolder = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\im_train2';
+
+% Cartelle di output
+outputMaskFolder = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\gt_train_RETE_CROP';
+outputImageFolder = 'C:\Users\silgi\Desktop\progetto EI (no OneDrive)\matlab EI PROGETTO\im_train_RETE_CROP';
+
+% Svuota le cartelle di output senza eliminarle
+if exist(outputMaskFolder, 'dir')
+    delete(fullfile(outputMaskFolder, '*.png')); % Cancella solo i file PNG
+end
+if exist(outputImageFolder, 'dir')
+    delete(fullfile(outputImageFolder, '*.png')); % Cancella solo i file PNG
+end
+
+
+% Ottenere la lista delle maschere
+maskFiles = dir(fullfile(maskFolder, '*.png'));
+
+% Passo 1: Determinare la dimensione massima del quadrato
+maxSquareSide = 0;
+
+for k = 1:length(maskFiles)
+    maskPath = fullfile(maskFolder, maskFiles(k).name);
+    mask = imread(maskPath);
+    
+    if size(mask, 3) == 3
+        mask = rgb2gray(mask);
+    end
+    
+    whitePixels = find(mask == 255);
+    if isempty(whitePixels)
+        continue;
+    end
+    
+    [row, col] = ind2sub(size(mask), whitePixels);
+    rectWidth = max(col) - min(col);
+    rectHeight = max(row) - min(row);
+    
+    squareSide = max(rectWidth, rectHeight) + 150;
+    maxSquareSide = max(maxSquareSide, squareSide);
+end
+
+fprintf('🔹 Dimensione massima del quadrato trovata: %d x %d\n', maxSquareSide, maxSquareSide);
+
+% Passo 2: Applicare il ritaglio uniforme a tutte le immagini
+for k = 1:length(maskFiles)
+    maskPath = fullfile(maskFolder, maskFiles(k).name);
+    imageName = strrep(maskFiles(k).name, '_GT_', '_');
+    imagePath = fullfile(imageFolder, imageName);
+    
+    if ~isfile(imagePath)
+        fprintf('⚠️ ERRORE: Immagine %s NON trovata. Skipping...\n', imageName);
+        continue;
+    end
+    
+    mask = imread(maskPath);
+    image = imread(imagePath);
+    
+    if size(mask, 3) == 3
+        mask = rgb2gray(mask);
+    end
+    if size(image, 3) == 3
+        image = rgb2gray(image);
+    end
+    
+    whitePixels = find(mask == 255);
+    if isempty(whitePixels)
+        fprintf('⚠️ Nessun pixel bianco trovato in %s. Skipping...\n', maskFiles(k).name);
+        continue;
+    end
+    
+    [row, col] = ind2sub(size(mask), whitePixels);
+    centerRow = round((min(row) + max(row)) / 2);
+    centerCol = round((min(col) + max(col)) / 2);
+    
+    halfSide = round(maxSquareSide / 2);
+    squareMinRow = max(1, centerRow - halfSide);
+    squareMaxRow = min(size(mask, 1), centerRow + halfSide);
+    squareMinCol = max(1, centerCol - halfSide);
+    squareMaxCol = min(size(mask, 2), centerCol + halfSide);
+    
+    if (squareMaxRow - squareMinRow) < maxSquareSide
+        if squareMaxRow == size(mask, 1)
+            squareMinRow = squareMaxRow - maxSquareSide;
+        elseif squareMinRow == 1
+            squareMaxRow = squareMinRow + maxSquareSide;
+        end
+    end
+
+    if (squareMaxCol - squareMinCol) < maxSquareSide
+        if squareMaxCol == size(mask, 2)
+            squareMinCol = squareMaxCol - maxSquareSide;
+        elseif squareMinCol == 1
+            squareMaxCol = squareMinCol + maxSquareSide;
+        end
+    end
+    
+    croppedMask = mask(squareMinRow:squareMaxRow, squareMinCol:squareMaxCol);
+    croppedImage = image(squareMinRow:squareMaxRow, squareMinCol:squareMaxCol);
+    
+      % ✅ Converte i valori della maschera in 0 e 1
+         croppedMask = uint8(croppedMask == 255); % Converte i pixel bianchi in 1, mantiene gli altri a 0
+    
+    outputMaskPath = fullfile(outputMaskFolder, maskFiles(k).name);
+    outputImagePath = fullfile(outputImageFolder, imageName);
+    
+    imwrite(croppedMask, outputMaskPath);
+    imwrite(croppedImage, outputImagePath);
+    
+    fprintf('✅ Immagine e maschera ritagliate salvate: %s\n', imageName);
+end
+
+fprintf('🎯 Elaborazione completata! Controlla le cartelle:\n');
+fprintf('- 📂 Maschere ritagliate: %s\n', outputMaskFolder);
+fprintf('- 📂 Mammografie ritagliate: %s\n', outputImageFolder);
+
+
+%% preparazione per la rete
+
+imds = imageDatastore(outputImageFolder, ...
+    'FileExtensions', {'.png', '.jpg', '.tif'}); % Modifica i formati se necessario
+% Creazione del pixelLabelDatastore con funzione personalizzata
+classi = ["N", "B"]; % N = sfondo, B = oggetto da segmentare
+etichettePixel = [0, 1]; % Valori effettivi nelle maschere
+% Usa una funzione per forzare i valori delle maschere
+pxds = pixelLabelDatastore(outputMaskFolder, classi, etichettePixel, ...
+    'FileExtensions', {'.png', '.jpg', '.tif'}, ...
+    'ReadFcn', @customReadMask);
+% 🔄 Controllo del dataset
+disp("✅ Immagini trovate:");
+disp(imds.Files(1:min(5, numel(imds.Files))));
+disp("✅ Maschere trovate:");
+disp(pxds.Files(1:min(5, numel(pxds.Files))));
+% Controllo del numero di pixel per classe
+tbl = countEachLabel(pxds);
+disp("📊 Numero di pixel per classe:");
+disp(tbl);
+% 🖼️ Visualizza alcune maschere
+figure;
+for i = 1:5
+    mask = readimage(pxds, i);
+    maskNumeric = uint8(mask); % Converti da categorical a uint8
+    subplot(1,5,i);
+    imshow(maskNumeric, []);
+    title(sprintf('Maschera %d', i));
+end
+
+%% Creazione della rete DeepLabV3+
+imageSize = [401 401 3]; % Dimensione delle immagini
+numClasses = 2; % Numero di classi (sfondo + oggetto)
+lgraph = deeplabv3plus(imageSize, numClasses, "resnet18");
+
+% 📌 Bilanciamento classi per evitare overfitting sullo sfondo
+totalNumberOfPixels = sum(tbl.PixelCount);
+frequency = tbl.PixelCount / totalNumberOfPixels;
+%classWeights = 1 ./ frequency;
+classWeights = 1 ./ log(1.1 + frequency); % Valore 1.1 evita log(0)
+
+
+% 📌 Creazione del layer di classificazione
+%pxLayer = pixelClassificationLayer('Name','labels','Classes', tbl.Name,'ClassWeights', classWeights);
+%pxLayer = pixelClassificationLayer('Name', 'labels', 'Classes', tbl.Name);
+softmaxLayer = softmaxLayer('Name', 'softmax');
+lgraph = addLayers(lgraph, softmaxLayer);
+lgraph = connectLayers(lgraph, 'dec_crop2', 'softmax'); % Sostituisci con il nome esatto
+lgraph = connectLayers(lgraph, 'softmax', 'labels'); % Collega Softmax al layer di classificazione
+
+pxLayer = pixelClassificationLayer('Name', 'labels', ...
+    'Classes', tbl.Name, ...
+    'ClassWeights', 1 ./ log(1.1 + frequency)); % Evita pesi estremi
+
+% 📌 Identifica il nome corretto del layer finale
+disp("📌 Nomi dei layer nella rete:");
+disp({lgraph.Layers.Name}); % Mostra i nomi dei layer
+% 📌 Sostituzione del layer finale corretto
+lgraph = replaceLayer(lgraph, "softmax-out", pxLayer);
+% 📌 Creazione del datastore combinato immagini + maschere
+pximds = pixelLabelImageDatastore(imds, pxds, ...
+    'OutputSize', imageSize, ...
+    'ColorPreprocessing', 'gray2rgb'); % Converti in RGB se necessario
+%% ⚙️ Opzioni di addestramento
+options = trainingOptions('adam', ...
+    'InitialLearnRate', 0.0001, ...
+    'MaxEpochs', 10, ...  
+    'MiniBatchSize', 4, ...
+    'Verbose',true, ...
+    'Shuffle', "every-epoch", ...
+    'Plots', 'training-progress', ...
+    'ValidationPatience', 15, ...
+    'VerboseFrequency', 20, ...
+     'OutputFcn', @lossDebugger);
+% 📌 Verifica che il datastore sia pronto
+disp("✅ Datastore pronto per l'addestramento!");
+%disp(pximds);
+% 📌 Avvia l'addestramento
+net = trainNetwork(pximds, layerGraph(lgraph), options);
+disp("🎉 Addestramento completato con successo!");
+
+
+clear net;
+
+
+
+
+
+%% visualizzo rete
+
+analyzeNetwork(net);
+
+%% attivo i layer
+I=imread(pximds.Images{1});
+GT=imread(pximds.PixelLabelData{1});
+
+I2=cat(3,I,I,I);
+act=activations(net,I2,'scorer');
+act = mat2gray(act);
+act = imtile(act);
+figure
+imshow(act)
+%% test di tutti i frame 
+close all;
+f_test=dir('C:\Didattica\EIM2023_2024\Lezione11122023\FRAME_TEST_SEG\*.tiff');
+gt_test=dir('C:\Didattica\EIM2023_2024\Lezione11122023\GT_TEST\*.tiff');
+
+for l = 1 : length(f_test)
+    l
+testImage=imread(['FRAME_TEST_SEG\',f_test(l).name]);
+testImage=imresize(testImage,imageSize(1:2));
+GTImage=imread(['GT_TEST\',gt_test(l).name]);
+
+C_test = semanticseg(testImage,net);
+D=C_test=='B'; % per rendere logica l'immagine di uscita
+E=imfill(D,'holes');
+F=imclose(E,strel('disk',3));
+G=bwareafilt(F,1);
+[TP,FP,FN,CR,CM,FM(l)]=evaluation_segmentation(G,GTImage);
+
+% imwrite(D,['FRAME_TEST_SEG_NEW\',f_test(l).name(1:end-5),'_seg.tiff']);
+imshowpair(testImage,G,'montage');
+pause();
+clear C D testImage;
+end
+
+%% valuto prestazioni in training
+close all;
+f_train=dir('C:\Didattica\EIM2023_2024\Lezione11122023\FRAME_TRAIN\*.tiff');
+gt_train=dir('C:\Didattica\EIM2023_2024\Lezione11122023\GT_TRAIN\*.tiff');
+for l = 1 : length(f_train)
+    l
+testImage=imread(['FRAME_TRAIN\',f_train(l).name]);
+GTImage=imread(['GT_TRAIN\',gt_train(l).name]);
+C_test = semanticseg(testImage,net);
+D=C_test=='B';
+% imwrite(D,['FRAME_TEST_SEG_NEW\',f_test(l).name(1:end-5),'_seg.tiff']);
+imshowpair(testImage,D,'montage');
+[TP,FP,FN,CR,CM,FM(l)]=evaluation_segmentation(bwareafilt(D,1),GTImage);
+pause(0.5);
+clear C D testImage;
+end
+
+%% morphological
+close all;
+
+I=imread(pximds.Images{1});
+GT=imread(pximds.PixelLabelData{1});
+
+B=strel('disk',7);
+GT1=imopen(GT,B);
+figure(); 
+imshow(GT1);
+
+GT2=imclose(GT,B);
+figure(); 
+imshow(GT2);
+
+GT3=bwperim(GT);
+figure(); 
+imshow(GT3);
+
+GT4=bwmorph(GT,'skel','inf');
+figure(); 
+imshow(GT4);
+
+GT5=imtophat(GT,B);
+figure(); 
+imshow(GT5);
+
+GT6=bwareafilt(GT5,1);
+figure(); 
+imshow(GT6);
+
+%% features eextraction
+
+R=regionprops(logical(GT),'All');
+close all;
+imshow(GT); 
+hold on; 
+drawrectangle('Position',R.BoundingBox);
+Area_BB=R.BoundingBox(3)*R.BoundingBox(4);
+Area_GT=R.Area;
+
+%Extent = Area_GT/Area_BB
+
+hold on; 
+drawpolygon('Position',R.ConvexHull);
+Area_CH=R.ConvexArea;
+%Solidity = Area_GT/Area_CH;
+
+% feature texture
+Id=im2double(I);
+mean_I=mean(Id(GT==1));
+std_I=std(Id(GT==1));
+median_I=median(Id(GT==1));
+mode_I=mode(Id(GT==1));
+
+% ribbon extraction
+B=strel('disk',7);
+GT_int=imerode(GT,B);
+GT_ext=imdilate(GT,B);
+ribbon=GT_ext-GT_int;
+
+figure(); imshow(ribbon);
+figure(); imshow(Id.*ribbon);
+
+Id_ribbon=Id.*ribbon;
+mean_rib=mean(Id_ribbon);
+std_rib=std(Id_ribbon);
+median_rib=median(Id_ribbon);
+mode_rib=mode(Id_ribbon);
+
